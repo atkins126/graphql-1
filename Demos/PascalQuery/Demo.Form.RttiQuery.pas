@@ -26,8 +26,8 @@ interface
 uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants,
   System.Classes, System.Rtti, System.Types, System.IOUtils, Vcl.Graphics,
-  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, GraphQL.Query,
-  GraphQL.Resolver.Core;
+  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, GraphQL.Core, GraphQL.Query,
+  GraphQL.Resolver.Core, Vcl.ExtCtrls, Vcl.Imaging.pngimage;
 
 type
   TRttiQueryForm = class(TForm)
@@ -36,6 +36,10 @@ type
     ResultMemo: TMemo;
     Label1: TLabel;
     FilesComboBox: TComboBox;
+    Panel1: TPanel;
+    Label2: TLabel;
+    Label3: TLabel;
+    Image1: TImage;
     procedure FilesComboBoxChange(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure FormKeyUp(Sender: TObject; var Key: Word; Shift: TShiftState);
@@ -58,7 +62,8 @@ implementation
 
 uses
   System.JSON, REST.Json,
-  Demo.API.Test, GraphQL.Utils.JSON, GraphQL.Resolver.Rtti;
+  Demo.API.Test, GraphQL.Utils.JSON, GraphQL.Resolver.Rtti,
+  Demo.Form.Parameters;
 
 type
   TTestApiResolver = class(TInterfacedObject, IGraphQLResolver)
@@ -102,6 +107,8 @@ begin
     begin
       if AParams.Exists('id') then
         Result := StarWarsHero(AParams.Get('id').AsString)
+      else if AParams.Exists('episode') then
+        Result := TValue.From<TStarWarsHeros>(StarWarsHeroByEpisode(AParams.Get('episode').AsString))
       else
         Result := StarWarsHero('1000');
     end
@@ -153,8 +160,14 @@ begin
 end;
 
 procedure TRttiQueryForm.RunQueryButtonClick(Sender: TObject);
+var
+  LGraphQL: IGraphQL;
+  LVariables: IGraphQLVariables;
 begin
-  ResultMemo.Text := TJSONHelper.PrettyPrint(FQuery.Run(SourceMemo.Text));
+  LGraphQL := FQuery.Parse(SourceMemo.Text);
+  LVariables := TParametersForm.GetVariables(LGraphQL);
+
+  ResultMemo.Text := TJSONHelper.PrettyPrint(FQuery.Run(LGraphQL, LVariables));
 end;
 
 { TTestApiResolver }

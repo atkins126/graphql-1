@@ -30,15 +30,22 @@ uses
 type
   TGraphQLBuilder = class(TSyntaxAnalysis)
   private
+    FOwnsScanner: Boolean;
+
     { Rules }
     function ArgumentStamement: IGraphQLArgument;
-    procedure ArgumentsStatement(AArguments: IGraphQLArguments);
-    function FieldStatement: IGraphQLField;
-    function ObjectStatement: IGraphQLObject;
+    procedure ArgumentsStatement(AArguments: IGraphQLList<IGraphQLArgument>);
+    function FieldStatement(AParentField: IGraphQLField): IGraphQLField;
+    function ObjectStatement(AParentField: IGraphQLField): IGraphQLObject;
     procedure Query(AGraphQL: IGraphQL);
     procedure GraphQL(AGraphQL: IGraphQL);
+    procedure Variables(AGraphQL: IGraphQL);
+    procedure Variable(AGraphQL: IGraphQL);
+    function TypeName(AGraphQL: IGraphQL): TGraphQLVariableType;
   public
     function Build: IGraphQL;
+    constructor Create(const ASourceCode :string); reintroduce;
+    destructor Destroy; override;
   end;
 
 implementation
@@ -46,24 +53,26 @@ implementation
 { TSyntaxAnalysis }
 
 // arguments = '(' argument [ ',' argument [...] ] } '}'
-procedure TGraphQLBuilder.ArgumentsStatement(AArguments: IGraphQLArguments);
+procedure TGraphQLBuilder.ArgumentsStatement(AArguments: IGraphQLList<IGraphQLArgument>);
 begin
   Expect(TTokenKind.LeftParenthesis);
 
-  AArguments.Add(ArgumentStamement);
+  (AArguments as IEditableList<IGraphQLArgument>).Add(ArgumentStamement);
   while FToken.Kind = TTokenKind.Comma do
   begin
     NextToken;
-    AArguments.Add(ArgumentStamement);
+    (AArguments as IEditableList<IGraphQLArgument>).Add(ArgumentStamement);
   end;
 
   Expect(TTokenKind.RightParenthesis);
 end;
 
-// argument = identified : ( string | number | identifier )
+// argument = identified : ( string | number | boolean | variable)
 function TGraphQLBuilder.ArgumentStamement: IGraphQLArgument;
 var
   LName: string;
+  LType: TGraphQLVariableType;
+  LAttributes: TGraphQLArgumentAttributes;
   LValue: TValue;
 begin
   Expect(TTokenKind.Identifier, False);
@@ -72,17 +81,46 @@ begin
 
   Expect(TTokenKind.Colon);
 
+  LAttributes := [];
+
   case FToken.Kind of
-    TTokenKind.StringLiteral: LValue := FToken.StringValue;
-    TTokenKind.IntegerLiteral: LValue := FToken.IntegerValue;
-    TTokenKind.FloatLiteral: LValue := FToken.FloatValue;
-    TTokenKind.Identifier: begin
+    TTokenKind.StringLiteral:
+    begin
+      LType := TGraphQLVariableType.StringType;
+      LValue := FToken.StringValue;
+    end;
+    TTokenKind.IntegerLiteral:
+    begin
+      LType := TGraphQLVariableType.IntType;
+      LValue := FToken.IntegerValue;
+    end;
+    TTokenKind.FloatLiteral:
+    begin
+      LType := TGraphQLVariableType.FloatType;
+      LValue := FToken.FloatValue;
+    end;
+    TTokenKind.Variable:
+    begin
+      LType := TGraphQLVariableType.UnknownType;
+      LValue := FToken.StringValue;
+      LAttributes := [TGraphQLArgumentAttribute.Variable];
+    end;
+    TTokenKind.Identifier:
+    begin
       if FToken.StringValue = 'true' then
+      begin
+        LType := TGraphQLVariableType.BooleanType;
         LValue := True
+      end
       else if FToken.StringValue = 'false' then
+      begin
+        LType := TGraphQLVariableType.BooleanType;
         LValue := False
+      end
       else
-        LValue := FToken.StringValue;
+      begin
+        raise ESyntaxError.Create(Format('String or number expected but identifier [%s] found', [FToken.StringValue]), FToken.LineNumber, FToken.ColumnNumber);
+      end
     end
     else
       raise ESyntaxError.Create('String or number expected', FToken.LineNumber, FToken.ColumnNumber);
@@ -91,7 +129,7 @@ begin
 
   NextToken;
 
-  Result := TGraphQLArgument.Create(LName, LValue);
+  Result := TGraphQLArgument.Create(LName, LType, LAttributes, LValue);
 end;
 
 function TGraphQLBuilder.Build: IGraphQL;
@@ -101,13 +139,27 @@ begin
   GraphQL(Result);
 end;
 
+constructor TGraphQLBuilder.Create(const ASourceCode: string);
+begin
+  inherited Create(TScanner.CreateFromString(ASourceCode));
+  FOwnsScanner := True;
+end;
+
+destructor TGraphQLBuilder.Destroy;
+begin
+  if FOwnsScanner then
+    FScanner.Free;
+  inherited;
+end;
+
 // field = [alias ':' ] fieldname [ arguments ] [object]
-function TGraphQLBuilder.FieldStatement: IGraphQLField;
+function TGraphQLBuilder.FieldStatement(AParentField: IGraphQLField): IGraphQLField;
 var
   LFieldName: string;
   LFieldAlias: string;
   LValue: IGraphQLValue;
-  LArguments: IGraphQLArguments;
+  LArguments: IGraphQLList<IGraphQLArgument>;
+  LGraphQLField: TGraphQLField;
 begin
   Expect(TTokenKind.Identifier, False);
 
@@ -123,19 +175,87 @@ begin
     NextToken;
   end;
 
-  LArguments := TGraphQLArguments.Create;
+  LArguments := TInterfacedList<IGraphQLArgument>.Create;
   if FToken.Kind = TTokenKind.LeftParenthesis then
     ArgumentsStatement(LArguments);
 
-  if FToken.Kind = TTokenKind.LeftCurleyBracket then
-    LValue := ObjectStatement
-  else
-    LValue := TGraphQLNull.Create;
+  LGraphQLField := TGraphQLField.Create(AParentField, LFieldName, LFieldAlias, LArguments);
+  try
 
-  Result := TGraphQLField.Create(LFieldName, LFieldAlias, LArguments, LValue);
+    if FToken.Kind = TTokenKind.LeftCurlyBracket then
+      LValue := ObjectStatement(LGraphQLField as IGraphQLField)
+    else
+      LValue := TGraphQLNull.Create;
+
+    LGraphQLField.SetValue(LValue);
+
+  except
+    LGraphQLField.Free;
+    raise;
+  end;
+  Result := LGraphQLField;
 end;
 
-// GraphQL = 'query' queryname query | query
+// TypeName = String | Int | Float | Boolean | ID
+function TGraphQLBuilder.TypeName(AGraphQL: IGraphQL): TGraphQLVariableType;
+begin
+  if FToken.IsIdentifier('String') then
+    Result := TGraphQLVariableType.StringType
+  else if FToken.IsIdentifier('Int') then
+    Result := TGraphQLVariableType.IntType
+  else if FToken.IsIdentifier('Float') then
+    Result := TGraphQLVariableType.FloatType
+  else if FToken.IsIdentifier('Boolean') then
+    Result := TGraphQLVariableType.BooleanType
+  else if FToken.IsIdentifier('ID') then
+    Result := TGraphQLVariableType.IdType
+  else
+    raise ESyntaxError.Create(
+      Format('Unknown variable type [%s]', [FToken.StringValue]),
+      FToken.LineNumber,
+      FToken.ColumnNumber
+    );
+
+  NextToken;
+end;
+
+// Variables = $ identifier : typename
+procedure TGraphQLBuilder.Variable(AGraphQL: IGraphQL);
+var
+  LParamName: string;
+  LParamType: TGraphQLVariableType;
+  LRequired: Boolean;
+begin
+  LRequired := False;
+  LParamName := FToken.StringValue;
+  Expect(TTokenKind.Variable);
+  Expect(TTokenKind.Colon);
+  LParamType := TypeName(AGraphQL);
+
+  if FToken.Kind = TTokenKind.IdentifierNot then
+  begin
+    LRequired := True;
+    NextToken;
+  end;
+
+  AGraphQL.AddParam(TGraphQLParam.Create(LParamName, LParamType, LRequired));
+end;
+
+// Variables = [ variable [ variable ... ] ]
+procedure TGraphQLBuilder.Variables(AGraphQL: IGraphQL);
+begin
+  if FToken.Kind = TTokenKind.LeftParenthesis then
+  begin
+    repeat
+      NextToken;
+      Variable(AGraphQL);
+    until FToken.Kind <> TTokenKind.Comma;
+    Expect(TTokenKind.RightParenthesis);    
+  end;
+end;
+
+
+// GraphQL = 'query' queryname [ Variables ] query | query
 procedure TGraphQLBuilder.GraphQL(AGraphQL: IGraphQL);
 begin
   NextToken;
@@ -148,6 +268,7 @@ begin
 
     AGraphQL.Name := FToken.StringValue;
     NextToken;
+    Variables(AGraphQL);
     Query(AGraphQL);
   end
   else
@@ -159,23 +280,23 @@ begin
 end;
 
 // object = '{' { field [,] } '}'
-function TGraphQLBuilder.ObjectStatement: IGraphQLObject;
+function TGraphQLBuilder.ObjectStatement(AParentField: IGraphQLField): IGraphQLObject;
 var
   LValue: TGraphQLObject;
 begin
-  Expect(TTokenKind.LeftCurleyBracket);
+  Expect(TTokenKind.LeftCurlyBracket);
 
   LValue := TGraphQLObject.Create;
   Result := LValue;
 
   repeat
-    LValue.Add(FieldStatement);
+    LValue.Add(FieldStatement(AParentField));
     if FToken.Kind = TTokenKind.Comma then
       NextToken;
 
-  until FToken.Kind = TTokenKind.RightCurleyBracket;
+  until FToken.Kind = TTokenKind.RightCurlyBracket;
 
-  Expect(TTokenKind.RightCurleyBracket);
+  Expect(TTokenKind.RightCurlyBracket);
 end;
 
 // query = '{' objectpair [ [','] objectpair [ [','] objectpair ] ] '}'
@@ -183,18 +304,18 @@ procedure TGraphQLBuilder.Query(AGraphQL: IGraphQL);
 var
   LField: IGraphQLField;
 begin
-  Expect(TTokenKind.LeftCurleyBracket);
+  Expect(TTokenKind.LeftCurlyBracket);
 
   repeat
-    LField := FieldStatement;
+    LField := FieldStatement(nil);
     AGraphQL.AddField(LField);
 
     if FToken.Kind = TTokenKind.Comma then
       NextToken;
 
-  until FToken.Kind = TTokenKind.RightCurleyBracket;
+  until FToken.Kind = TTokenKind.RightCurlyBracket;
 
-  Expect(TTokenKind.RightCurleyBracket);
+  Expect(TTokenKind.RightCurlyBracket);
 end;
 
 end.

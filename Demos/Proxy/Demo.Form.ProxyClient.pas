@@ -26,7 +26,8 @@ interface
 uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
   Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, Winapi.ShellAPI, Demo.ProxyServer,
-  IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdHTTP;
+  IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdHTTP,
+  Vcl.ExtCtrls, Vcl.Imaging.pngimage;
 
 type
   TMainProxyForm = class(TForm)
@@ -42,6 +43,10 @@ type
     memLog: TMemo;
     lblLink: TLabel;
     Label3: TLabel;
+    Panel1: TPanel;
+    Image1: TImage;
+    Label4: TLabel;
+    Label5: TLabel;
     procedure btnStartClick(Sender: TObject);
     procedure btnStopClick(Sender: TObject);
     procedure FormKeyUp(Sender: TObject; var Key: Word; Shift: TShiftState);

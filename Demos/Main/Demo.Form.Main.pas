@@ -27,25 +27,28 @@ uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants,
   System.Classes, System.IOUtils, System.Types, Vcl.Graphics,
   Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, Vcl.ComCtrls,
-  GraphQL.Core;
+  GraphQL.Core, GraphQL.Lexer.Core, GraphQL.SyntaxAnalysis.Builder, Vcl.ExtCtrls,
+  Vcl.Imaging.pngimage;
 
 type
   TMainForm = class(TForm)
     SourceMemo: TMemo;
     LogMemo: TMemo;
-    RunLexerButton: TButton;
-    SyntaxCheckButton: TButton;
-    btnTreeBuilder: TButton;
+    TreeBuilderButton: TButton;
     SyntaxTreeView: TTreeView;
     FilesComboBox: TComboBox;
     Label1: TLabel;
+    Panel1: TPanel;
+    Label2: TLabel;
+    Label3: TLabel;
+    Image1: TImage;
     procedure FormCreate(Sender: TObject);
-    procedure btnTreeBuilderClick(Sender: TObject);
-    procedure Button1Click(Sender: TObject);
+    procedure TreeBuilderButtonClick(Sender: TObject);
     procedure FilesComboBoxChange(Sender: TObject);
-    procedure SyntaxCheckButtonClick(Sender: TObject);
+    procedure FormKeyUp(Sender: TObject; var Key: Word; Shift: TShiftState);
   private
     FSampleDir: string;
+    procedure HandleReadToken(ASender: TObject; AToken: TToken);
     procedure ShowGraphQL(AGraphQL: IGraphQL);
     procedure ReadFiles;
   public
@@ -58,10 +61,6 @@ var
 implementation
 
 {$R *.dfm}
-
-uses
-  GraphQL.Lexer.Core, GraphQL.SyntaxAnalysis.Checker,
-  GraphQL.SyntaxAnalysis.Builder;
 
 procedure TMainForm.FormCreate(Sender: TObject);
 begin
@@ -81,49 +80,28 @@ begin
     FilesComboBox.Items.Add(ExtractFileName(LFileName));
 end;
 
-procedure TMainForm.btnTreeBuilderClick(Sender: TObject);
+procedure TMainForm.TreeBuilderButtonClick(Sender: TObject);
 var
-  LScanner: TScanner;
   LBuilder: TGraphQLBuilder;
   LGraphQL: IGraphQL;
 begin
   inherited;
-  SyntaxTreeView.Items.Clear;
+  if SourceMemo.Text = '' then
+    Exit;
 
-  LScanner := TScanner.CreateFromString(SourceMemo.Text);
+  SyntaxTreeView.Items.Clear;
+  LogMemo.Clear;
+
+  LBuilder := TGraphQLBuilder.Create(SourceMemo.Text);
   try
-    LBuilder := TGraphQLBuilder.Create(LScanner);
-    try
-      LGraphQL := LBuilder.Build;
-    finally
-      LBuilder.Free;
-    end;
+    LBuilder.OnReadToken := HandleReadToken;
+    LGraphQL := LBuilder.Build;
   finally
-    LScanner.Free;
+    LBuilder.Free;
   end;
 
   ShowGraphQL(LGraphQL);
 
-end;
-
-procedure TMainForm.Button1Click(Sender: TObject);
-var
-  LScanner: TScanner;
-  LToken: TToken;
-begin
-  LogMemo.Clear;
-  LScanner := TScanner.CreateFromString(SourceMemo.Text);
-  try
-    while True do
-    begin
-      LToken := LScanner.NextToken;
-      if LToken.Kind = TTokenKind.EndOfStream then
-        Break;
-      LogMemo.Lines.Add(LToken.ToString);
-    end;
-  finally
-    LScanner.Free;
-  end;
 end;
 
 procedure TMainForm.FilesComboBoxChange(Sender: TObject);
@@ -138,29 +116,44 @@ begin
   end;
 end;
 
+procedure TMainForm.FormKeyUp(Sender: TObject; var Key: Word; Shift:
+    TShiftState);
+begin
+  if Key = VK_F5 then
+    TreeBuilderButton.Click;
+end;
+
+procedure TMainForm.HandleReadToken(ASender: TObject; AToken: TToken);
+begin
+  LogMemo.Lines.Add(AToken.ToString);
+end;
+
 procedure TMainForm.ShowGraphQL(AGraphQL: IGraphQL);
 
-  function GetFieldNameCaption(LGraphQLField: IGraphQLField): string;
+  function GetFieldNameCaption(AGraphQLField: IGraphQLField): string;
   begin
-    if LGraphQLField.FieldName = LGraphQLField.FieldAlias then
-      Result := LGraphQLField.FieldName
+    if AGraphQLField.FieldName = AGraphQLField.FieldAlias then
+      Result := AGraphQLField.FieldName
     else
-      Result := Format('%s (%s)', [LGraphQLField.FieldName, LGraphQLField.FieldAlias])
+      Result := Format('%s (%s)', [AGraphQLField.FieldName, AGraphQLField.FieldAlias])
   end;
 
   procedure ShowArguments(LGraphQLField: IGraphQLField; AParentNode: TTreeNode);
   var
     LArgumentsNode: TTreeNode;
-    LArgumentIndex: Integer;
     LGraphQLArgument: IGraphQLArgument;
+    LArgumentInfo: string;
   begin
     if LGraphQLField.ArgumentCount > 0 then
     begin
       LArgumentsNode := SyntaxTreeView.Items.AddChild(AParentNode, 'Arguments');
-      for LArgumentIndex := 0 to LGraphQLField.ArgumentCount - 1 do
+      for LGraphQLArgument in LGraphQLField.Arguments do
       begin
-        LGraphQLArgument := LGraphQLField.Arguments[LArgumentIndex];
-        SyntaxTreeView.Items.AddChild(LArgumentsNode, Format('%s : %s', [LGraphQLArgument.Name, LGraphQLArgument.Value.ToString]));
+        if TGraphQLArgumentAttribute.Variable in LGraphQLArgument.Attributes then
+          LArgumentInfo := 'Variable'
+        else
+          LArgumentInfo := VariableTypeToStr(LGraphQLArgument.ArgumentType);
+        SyntaxTreeView.Items.AddChild(LArgumentsNode, Format('%s : %s (%s)', [LGraphQLArgument.Name, LGraphQLArgument.Value.ToString, LArgumentInfo]));
       end;
     end;
   end;
@@ -168,12 +161,10 @@ procedure TMainForm.ShowGraphQL(AGraphQL: IGraphQL);
   procedure ShowObject(AGraphQLObject: IGraphQLObject; AParentNode: TTreeNode);
   var
     LSubNode: TTreeNode;
-    LFieldIndex: Integer;
     LGraphQLField: IGraphQLField;
   begin
-    for LFieldIndex := 0 to AGraphQLObject.FieldCount - 1 do
+    for LGraphQLField in AGraphQLObject.Fields do
     begin
-      LGraphQLField := AGraphQLObject.Fields[LFieldIndex];
       LSubNode := SyntaxTreeView.Items.AddChild(AParentNode, GetFieldNameCaption(LGraphQLField));
       ShowArguments(LGraphQLField, LSubNode);
       if Supports(LGraphQLField.Value, IGraphQLObject) then
@@ -185,14 +176,26 @@ procedure TMainForm.ShowGraphQL(AGraphQL: IGraphQL);
 
 var
   LRootNode, LSubNode: TTreeNode;
-  LFieldIndex: Integer;
   LGraphQLField: IGraphQLField;
+  LGraphQLParam: IGraphQLParam;
+  LRequiredString: string;
 begin
   LRootNode := SyntaxTreeView.Items.AddChildFirst(nil, AGraphQL.Name + ' (query)');
 
-  for LFieldIndex := 0 to AGraphQL.FieldCount - 1 do
+  if AGraphQL.ParamCount > 0 then
   begin
-    LGraphQLField := AGraphQL.Fields[LFieldIndex];
+    LSubNode := SyntaxTreeView.Items.AddChild(LRootNode, 'Parameters');
+    for LGraphQLParam in AGraphQL.Params do
+    begin
+      LRequiredString := '';
+      if LGraphQLParam.Required then
+        LRequiredString := ' (required)';
+      SyntaxTreeView.Items.AddChild(LSubNode, LGraphQLParam.ParamName + ':' + VariableTypeToStr(LGraphQLParam.ParamType) + LRequiredString);
+    end;
+  end;
+
+  for LGraphQLField in AGraphQL.Fields do
+  begin
     LSubNode := SyntaxTreeView.Items.AddChild(LRootNode, GetFieldNameCaption(LGraphQLField));
     ShowArguments(LGraphQLField, LSubNode);
     if Supports(LGraphQLField.Value, IGraphQLObject) then
@@ -204,26 +207,6 @@ begin
 
   LRootNode.Expand(True);
 
-end;
-
-procedure TMainForm.SyntaxCheckButtonClick(Sender: TObject);
-var
-  LScanner: TScanner;
-  LSyntaxChecker: TSyntaxChecker;
-begin
-  inherited;
-  LScanner := TScanner.CreateFromString(SourceMemo.Text);
-  try
-    LSyntaxChecker := TSyntaxChecker.Create(LScanner);
-    try
-      LSyntaxChecker.Execute;
-    finally
-      LSyntaxChecker.Free;
-    end;
-  finally
-    LScanner.Free;
-  end;
-  ShowMessage('Syntax OK');
 end;
 
 end.

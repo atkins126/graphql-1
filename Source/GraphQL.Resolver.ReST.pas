@@ -24,7 +24,7 @@ unit GraphQL.Resolver.ReST;
 interface
 
 uses
-  System.Classes, System.SysUtils, System.Rtti, System.JSON, System.NetEncoding, Generics.Collections,
+  System.Classes, System.SysUtils, System.Rtti, System.TypInfo, System.JSON, System.NetEncoding, Generics.Collections,
   GraphQL.Core, GraphQL.Resolver.Core, IdHttp, System.RegularExpressions;
 
 type
@@ -33,6 +33,8 @@ type
     function Header(const AName: string): string;
     function ContentText: string;
   end;
+
+  TGraphQLHTTPRequestEvent = procedure (Sender: TObject; AHttpClient: TIdHttp) of object;
 
   TGraphQLHTTPResponse = class(TInterfacedObject, IGraphQLHTTPResponse)
   protected
@@ -47,19 +49,38 @@ type
     destructor Destroy; override;
   end;
 
+  TGraphQLReSTEntity = class
+  private
+    FEntity: string;
+    FIdProperty: string;
+    FUrl: string;
+    FParentEntityName: string;
+  public
+    property Entity: string read FEntity;
+    property Url: string read FUrl;
+    property IdProperty: string read FIdProperty;
+    property ParentEntityName: string read FParentEntityName;
+
+    constructor Create(AEntity, AUrl, AIdProperty: string);
+  end;
+
   TGraphQLReSTResolver = class(TInterfacedObject, IGraphQLResolver)
   private
-    FEntityMap: TDictionary<string,string>;
+    FEntityMap: TObjectDictionary<string,TGraphQLReSTEntity>;
     FHTTPRequestBuilder: TFunc<string, IGraphQLHTTPResponse>;
-    function BuildUrl(const LUrl: string; AParams: TGraphQLParams): string;
+    FBeforeRequestEvent: TGraphQLHTTPRequestEvent;
+    FAfterRequestEvent: TGraphQLHTTPRequestEvent;
+    function BuildUrl(AEntity: TGraphQLReSTEntity; AParams: TGraphQLParams): string;
     function ValueToString(LValue: TValue): string;
     function MakeHTTPRequest(const AUrl: string): IGraphQLHTTPResponse;
     procedure InitRequestBuilder;
   public
     { IGraphQLResolver }
     function Resolve(AParams: TGraphQLParams): TValue;
-    procedure MapEntity(const AEntity, AUrl: string);
+    procedure MapEntity(const AEntity, AUrl: string; const AIdProperty: string = 'id');
 
+    property BeforeRequestEvent: TGraphQLHTTPRequestEvent read FBeforeRequestEvent write FBeforeRequestEvent;
+    property AfterRequestEvent: TGraphQLHTTPRequestEvent read FAfterRequestEvent write FAfterRequestEvent;
     property HTTPRequestBuilder: TFunc<string, IGraphQLHTTPResponse> read FHTTPRequestBuilder write FHTTPRequestBuilder;
     constructor Create;
     destructor Destroy; override;
@@ -78,7 +99,7 @@ type
 constructor TGraphQLReSTResolver.Create;
 begin
   inherited Create;
-  FEntityMap := TDictionary<string,string>.Create;
+  FEntityMap := TObjectDictionary<string,TGraphQLReSTEntity>.Create([doOwnsValues]);
   InitRequestBuilder;
 end;
 
@@ -98,7 +119,11 @@ begin
     begin
       LHttpClient := TIdHTTP.Create(nil);
       try
+        if Assigned(FBeforeRequestEvent) then
+          FBeforeRequestEvent(Self, LHttpClient);
         LResponseText := LHttpClient.Get(AUrl);
+        if Assigned(FAfterRequestEvent) then
+          FAfterRequestEvent(Self, LHttpClient);
         Result := TGraphQLHTTPResponseIndy.Create(LResponseText, LHttpClient.Response);
       finally
         LHttpClient.Free;
@@ -108,9 +133,9 @@ begin
 end;
 
 procedure TGraphQLReSTResolver.MapEntity(const AEntity,
-  AUrl: string);
+  AUrl, AIdProperty: string);
 begin
-  FEntityMap.Add(AEntity, AUrl);
+  FEntityMap.Add(AEntity, TGraphQLReSTEntity.Create(AEntity, AUrl, AIdProperty));
 end;
 
 function TGraphQLReSTResolver.ValueToString(LValue: TValue): string;
@@ -129,15 +154,17 @@ begin
   end;
 end;
 
-function TGraphQLReSTResolver.BuildUrl(const LUrl: string; AParams: TGraphQLParams): string;
+function TGraphQLReSTResolver.BuildUrl(AEntity: TGraphQLReSTEntity; AParams: TGraphQLParams): string;
 var
   LParamPair: TPair<string, TValue>;
   LQueryParams: string;
   LMatches: TMatchCollection;
   LMatch: TMatch;
   LValue: string;
+  LParentIdProperty: string;
+  LParentEntity: TGraphQLReSTEntity;
 begin
-  Result := LUrl;
+  Result := AEntity.Url;
   LQueryParams := '';
   for LParamPair in AParams do
   begin
@@ -148,6 +175,14 @@ begin
     begin
       LQueryParams := LQueryParams + TNetEncoding.URL.EncodeQuery(LParamPair.Key) + '=' + TNetEncoding.URL.EncodeQuery(LValue) + '&';
     end;
+  end;
+
+  if Assigned(AParams.Parent) then
+  begin
+    LParentIdProperty := 'id';
+    if FEntityMap.TryGetValue(AEntity.ParentEntityName, LParentEntity) then
+      LParentIdProperty := LParentEntity.IdProperty;
+    Result := StringReplace(Result, '{parentId}', TNetEncoding.URL.EncodeQuery(AParams.Parent.GetValue<string>(LParentIdProperty)), []);
   end;
 
   // Strip templates
@@ -172,12 +207,13 @@ end;
 
 function TGraphQLReSTResolver.Resolve(AParams: TGraphQLParams): TValue;
 var
-  LUrl: string;
+  LEntity: TGraphQLReSTEntity;
   LHTTPResponse: IGraphQLHTTPResponse;
+  LUrl: string;
 begin
-  if FEntityMap.TryGetValue(AParams.FieldName, LUrl) then
+  if FEntityMap.TryGetValue(AParams.FieldName, LEntity) then
   begin
-    LUrl := BuildUrl(LUrl, AParams);
+    LUrl := BuildUrl(LEntity, AParams);
 
     LHTTPResponse := MakeHTTPRequest(LUrl);
 
@@ -227,6 +263,24 @@ begin
     LHeaderName := AResponse.RawHeaders.Names[LIndex];
     FHeaders.Add(LHeaderName, AResponse.RawHeaders.Values[LHeaderName]);
   end;
+end;
+
+{ TGraphQLReSTEntity }
+
+constructor TGraphQLReSTEntity.Create(AEntity, AUrl, AIdProperty: string);
+var
+  LEntityNamePair: TArray<string>;
+begin
+  inherited Create;
+  FEntity := AEntity;
+  FUrl := AUrl;
+  FIdProperty := AIdProperty;
+
+  LEntityNamePair := FEntity.Split(['/']);
+  if Length(LEntityNamePair) > 1 then
+    FParentEntityName := LEntityNamePair[0]
+  else
+    FParentEntityName := '';
 end;
 
 end.
